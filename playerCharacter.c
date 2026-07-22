@@ -7,72 +7,145 @@
 extern GLuint texturaSombraID;
 extern float deathBallYOffset;
 extern bool isDead;
+extern int skinPlayer; // Variável externa para controlar a skin
+//extern float edgeTiltAngley; trashed, tirar dps
+
+void drawFut(float raioEsfera) {
+    float PHI = 1.618033988749895f;
+    float PI = 3.141592653589793f;
+    float vertices[12][3] = {
+        {0, 1, PHI}, {0, -1, PHI}, {0, 1, -PHI}, {0, -1, -PHI},
+        {1, PHI, 0}, {-1, PHI, 0}, {1, -PHI, 0}, {-1, -PHI, 0},
+        {PHI, 0, 1}, {PHI, 0, -1}, {-PHI, 0, 1}, {-PHI, 0, -1}
+    };
+    
+    float raioPrisma = raioEsfera * 0.35f; 
+    float alturaPrisma = raioEsfera * 1.5f; 
+
+    glPushMatrix();
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+
+
+    glDisable(GL_STENCIL_TEST);
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glutSolidSphere(raioEsfera, 40, 40);
+    
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF); 
+    glClear(GL_STENCIL_BUFFER_BIT); 
+
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    
+    glStencilFunc(GL_ALWAYS, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+
+    for (int v = 0; v < 12; v++) {
+        glPushMatrix(); 
+        float vx = vertices[v][0], vy = vertices[v][1], vz = vertices[v][2];
+        float longitude = atan2(vy, vx) * 180.0f / PI;
+        float latitude = acos(vz / sqrt(vx*vx + vy*vy + vz*vz)) * 180.0f / PI;
+
+        // Rotaciona na direção do vértice do treco
+        glRotatef(longitude, 0.0f, 0.0f, 1.0f);
+        glRotatef(latitude, 0.0f, 1.0f, 0.0f);
+        
+        glTranslatef(0.0f, 0.0f, -raioEsfera * 0.5f);
+
+        float px[5], py[5];
+        for (int i = 0; i < 5; i++) {
+            float a = i * 2.0f * PI / 5.0f;
+            px[i] = raioPrisma * cos(a);
+            py[i] = raioPrisma * sin(a);
+        }
+
+        // Desenha as faces do prisma projetor
+        glBegin(GL_TRIANGLE_FAN);
+            glVertex3f(0.0f, 0.0f, alturaPrisma);
+            for (int i = 0; i <= 5; i++) glVertex3f(px[i % 5], py[i % 5], alturaPrisma);
+        glEnd();
+
+        glBegin(GL_TRIANGLE_FAN);
+            glVertex3f(0.0f, 0.0f, 0.0f);
+            for (int i = 5; i >= 0; i--) glVertex3f(px[i % 5], py[i % 5], 0.0f);
+        glEnd();
+
+        glBegin(GL_QUAD_STRIP);
+        for (int i = 0; i <= 5; i++) {
+            glVertex3f(px[i % 5], py[i % 5], alturaPrisma);
+            glVertex3f(px[i % 5], py[i % 5], 0.0f);
+        }
+        glEnd();
+        glPopMatrix(); 
+    }
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE); 
+    glStencilFunc(GL_EQUAL, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+
+    glColor3f(0.0f, 0.0f, 0.0f);
+    // Offset mínimo para evitar Z-Fighting
+    glutSolidSphere(raioEsfera + 0.0005f, 40, 40); 
+
+    glPopAttrib(); 
+    glPopMatrix();
+}
 
 void drawPlayer() {
     static float rollRotation = 0.0f;
     static float tiltAnglex = 0.0f;
     static float tiltAngley = 0.0f;
     
-    // Roll sempre atualiza (ilusão de movimento para frente)
-    rollRotation -= (speed * 100.0f);
-    if (rollRotation < -360.0f) rollRotation += 360.0f;
+    extern int isEndLevelScreenActive(void);
+    if (!isEndLevelScreenActive()) {
+        rollRotation -= (speed * 100.0f);
+        if (rollRotation < -360.0f) rollRotation += 360.0f;
+    }
     
-    // Tilt (orientação lateral) continua atualizando mesmo após a morte
     tiltAnglex = lateralSpeed * -250.0f; 
     tiltAngley = lateralSpeed * -400.0f;
+    //tiltAngley += edgeTiltAngley; trashed
     
     float height = cameraY - groundY;
 
-    // --- LOGICA DE SOMBRA PROJETADA EM MÚLTIPLOS BLOCOS ---
     float shadowZPos = cameraZ + 3.65f; 
     float radius = 0.21f + (height * 0.05f);
     if (radius < 0.01f) radius = 0.01f;
 
-    // Índices de linhas do mapa baseado no Z atual
     int playerRow = (int)floorf(-shadowZPos);
 
-    // Descobre a coluna central, a da esquerda e a da direita que a sombra pode tocar
     int colCentro = (int)floorf(cameraX / blockWidth);
     int colEsquerda = colCentro - 1;
     int colDireita = colCentro + 1;
 
     if (!isDead) {
-        // Ativa as configurações de renderização da sombra uma única vez
         glPushMatrix();
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, texturaSombraID);
             glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f); 
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-            // Vamos rodar um laço pelas 3 colunas que a sombra potencialmente intersecta
             for (int c = colEsquerda; c <= colDireita; c++) {
-                // Se a coluna estiver fora dos limites da pista (0 a 4), ignora
                 if (c < 0 || c >= 5) continue;
-
-                // CHECAGEM REAL DO MAPA: Se o bloco dessa coluna específica for um buraco (0),
-                // a sombra NÃO será desenhada aqui.
                 if (getMapValue(playerRow, c) != 1) continue;
 
-                // Calcula os limites físicos DESTE bloco específico que estamos avaliando no loop
                 float limiteEsquerdoBloco = c * blockWidth;
                 float limiteDireitoBloco = (c + 1) * blockWidth;
 
-                // Reseta os limites do quadrado para o tamanho total da sombra a cada iteração
-                float sombraMinX = cameraX - radius-1;
+                float sombraMinX = cameraX - radius;
                 float sombraMaxX = cameraX + radius;
                 float sombraMinZ = shadowZPos - radius;
                 float sombraMaxZ = shadowZPos + radius;
 
-                // Recorta o quadrado da sombra para caber estritamente dentro DESTE bloco
                 if (sombraMinX < limiteEsquerdoBloco) sombraMinX = limiteEsquerdoBloco;
                 if (sombraMaxX > limiteDireitoBloco)  sombraMaxX = limiteDireitoBloco;
 
-                // Se após o recorte, sobrou um pedaço válido de sombra dentro do bloco, desenha ele!
                 if (sombraMinX < sombraMaxX) {
                     glBegin(GL_QUADS);
-                        // Mapeia dinamicamente as coordenadas de textura (U) baseado no recorte
                         float uMin = (sombraMinX - (cameraX - radius)) / (radius * 2.0f);
                         float uMax = (sombraMaxX - (cameraX - radius)) / (radius * 2.0f);
 
@@ -89,17 +162,47 @@ void drawPlayer() {
         glPopMatrix();
     }
 
-    // --- ESFERA DO PERSONAGEM ---
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
     glPushMatrix();
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_LIGHTING);
+        glEnable(GL_COLOR_MATERIAL);
+
         glTranslatef(cameraX, cameraY - 1.0f + deathBallYOffset, cameraZ + 4.0f);
         float divisor = (12 * speed * speed * 4);
         if (divisor < 1) divisor = 1; 
         glRotatef(tiltAngley / divisor, 0.0f, 0.0f, 1.0f);
         glRotatef(tiltAnglex, 0.0f, 1.0f, 0.0f);
         glRotatef(rollRotation, 1.0f, 0.0f, 0.0f);
-        glColor3f(1.0f, 0.5f, 0.0f);
-        glutSolidSphere(0.1f, 20, 20);
-        glColor3f(0.0f, 0.0f, 0.0f); 
-        glutWireSphere(0.105f, 10, 10);
+        
+        if (skinPlayer == 1) {
+            // Desenha a esfera laranja
+            glColor3f(1.0f, 0.8f, 0.3f);
+            glutSolidSphere(0.1f, 20, 20);
+            glColor3f(0.0f, 0.0f, 0.0f); 
+            glutWireSphere(0.105f, 10, 10);
+        } else if (skinPlayer == 2) {
+            // Desenha a esfera rosa
+            glColor3f(1.0f, 0.4f, 0.6f);
+            glutSolidSphere(0.1f, 20, 20);
+            glColor3f(0.3f, 0.0f, 0.0f); 
+            glutWireSphere(0.105f, 16, 6);
+        } else if (skinPlayer == 3) {
+            drawFut(0.1f); 
+        } else if (skinPlayer == 4) {
+            // Desenha a esfera diamante
+            glColor3f(0.0f, 0.7f, 0.7f);
+            glutSolidSphere(0.1f, 4, 4);
+            glColor3f(0.5f, 1.0f, 1.0f); 
+            glutWireSphere(0.107f, 12, 10);
+        } else {
+            // Desenha a esfera preta transparente
+            glColor3f(0.0f, 0.0f, 0.0f);
+            glutSolidSphere(0.1f, 6, 4);
+            glColor3f(0.5f, 0.5f, 0.5f); 
+            glutWireSphere(0.107f, 8, 4);
+        }
+        
     glPopMatrix();
+    glPopAttrib();
 }

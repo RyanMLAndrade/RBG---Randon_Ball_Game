@@ -1,20 +1,23 @@
 #include <GL/glut.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include "gameEngine.h"
-#include "mapGenerator.h" // Importado para ler os dados da pista
+#include "mapGenerator.h"
 #include "constants.h"
+#include "uiScreens.h"
+#include "readwrite.h"
+#include "fontManager.h"
+#include "drawObject.h"
 
 float cameraX = 1.5f, cameraZ = 1.0f, cameraY = 1.2f;
-float speed = 0.1f, lateralSpeed = 0.0f;
-float maxSpeed = 0.30f, minSpeed = 0.1f;
+float speed = 0.15f, lateralSpeed = 0.15f;
+float maxSpeed = 0.30f, minSpeed = 0.15f;
 float accelVertical = 0.002f, dragVertical = 0.0005f;
 float accelLateral = 0.003f, maxLateralSpeed = 0.055f;
 float blockWidth = 0.6f;
-
 static bool deadControlLocked = false;
 
-
-// Física do Pulo
 float jumpSpeed = 0.0f;
 float gravity = 0.003f;
 float groundY = 1.2f;
@@ -23,7 +26,6 @@ float maxJumpSpeed = 0.06f;
 bool isJumping = false;
 bool canAscend = false; 
 
-// cayote jump
 int jumpBufferTimer = 0;
 const int JUMP_BUFFER_MAX = 10; 
 
@@ -38,21 +40,21 @@ bool mouseControlEnabled = true;
 float mouseXPercent = 0.0f;
 int mouseSteerFrame = 0;
 
-// ID da textura da sombra projetada
-GLuint texturaSombraID;
-
-// Estado do jogo
 bool isDead = false;
+int deathTimer = 0;
+int skinPlayer = 1;
 static float deathFallSpeed = 0.0f;
 float deathBallYOffset = 0.0f;
 static float platformCoverage = 0.0f;
 static float platformCoverageLeft = 0.0f;
 static float platformCoverageRight = 0.0f;
 
-// ============================================================================
-// --- 2. SISTEMA DE TEXTURA DA SOMBRA E INICIALIZAÇÃO ---
-// ============================================================================
+static bool endLevelScreen = false;
+static bool isVictory = false;
+static int endLevelMenuIndex = 0;
+static const int endLevelMenuCount = 3;
 
+GLuint texturaSombraID;
 void gerarTexturaSombra() {
     int tamanho = 64; 
     GLubyte pixels[64][64][4]; 
@@ -71,9 +73,9 @@ void gerarTexturaSombra() {
 
             alpha = alpha * alpha * 0.8f; 
 
-            pixels[y][x][0] = 0;   // R
-            pixels[y][x][1] = 0;   // G
-            pixels[y][x][2] = 0;   // B
+            pixels[y][x][0] = 0;   
+            pixels[y][x][1] = 0;   
+            pixels[y][x][2] = 0;   
             pixels[y][x][3] = (GLubyte)(alpha * 255); 
         }
     }
@@ -115,7 +117,7 @@ static void updatePlatformCoverage() {
     int rowCentro = (int)floorf(-shadowZPos);
     int colCentro = (int)floorf(cameraX / blockWidth);
 
-    for (int r = rowCentro - 1; r <= rowCentro + 1; r++) {
+    for (int r = rowCentro; r <= rowCentro + 1; r++) {
         float rowMinZ = -(r + 1);
         float rowMaxZ = -r;
         float overlapZ = fmaxf(0.0f, fminf(shadowMaxZ, rowMaxZ) - fmaxf(shadowMinZ, rowMinZ));
@@ -156,13 +158,46 @@ static void updatePlatformCoverage() {
     if (platformCoverageRight > 1.0f) platformCoverageRight = 1.0f;
 }
 
-const float minPlatformCoverageToStand = 0.21f; // 21% coverage = 79% outside the block
+const float minPlatformCoverageToStand = 0.21f; 
 
-static void resetPlayerPosition() {
+typedef enum {
+    CONTROL_MODE_WASD,
+    CONTROL_MODE_ARROW,
+    CONTROL_MODE_MOUSE,
+    CONTROL_MODE_COUNT
+} ControlMode;
+
+static ControlMode getSelectedControlMode(void) {
+    const char* controlValue = getConfigValue("control");
+    if (!controlValue) {
+        return CONTROL_MODE_WASD;
+    }
+    if (strcmp(controlValue, "Arrow") == 0) {
+        return CONTROL_MODE_ARROW;
+    }
+    if (strcmp(controlValue, "Mouse") == 0) {
+        return CONTROL_MODE_MOUSE;
+    }
+    return CONTROL_MODE_WASD;
+}
+
+static bool isMouseControlAllowed(void) {
+    return getSelectedControlMode() == CONTROL_MODE_MOUSE;
+}
+
+static bool isArrowControlAllowed(void) {
+    return getSelectedControlMode() == CONTROL_MODE_ARROW;
+}
+
+static bool isWASDControlAllowed(void) {
+    return getSelectedControlMode() == CONTROL_MODE_WASD;
+}
+
+void resetPlayerPosition() {
     cameraX = 1.5f;
     cameraZ = 1.0f;
     cameraY = 1.2f;
-    speed = 0.1f;
+    speed = 0.14f;
     lateralSpeed = 0.0f;
     jumpSpeed = 0.0f;
     deathFallSpeed = 0.0f;
@@ -170,6 +205,7 @@ static void resetPlayerPosition() {
     isJumping = false;
     canAscend = false;
     isDead = false;
+    deathTimer = 0;
     deadControlLocked = false;
     jumpBufferTimer = 0;
     jumpTimer = 0;
@@ -178,34 +214,125 @@ static void resetPlayerPosition() {
     platformCoverageRight = 0.0f;
     mouseXPercent = 0.0f;
     mouseSpecialDown = false;
+    isVictory = false;
     for (int i = 0; i < 256; i++) {
         keyStates[i] = false;
         specialKeyStates[i] = false;
     }
 }
 
+static bool canAdvanceToNextLevel(void) {
+    return getSelectedLevel() < getMaxLevelPreset();
+}
+
+static void endLevelConfirmSelection(void) {
+    if (endLevelMenuIndex == 0) {
+        if (isVictory) {
+            if (canAdvanceToNextLevel()) {
+                int proximoNivel = getSelectedLevel() + 1;
+                setSelectedLevel(proximoNivel);
+                setUnlockedLevel(proximoNivel);
+                resetPlayerPosition();
+            } else {
+                currentScreen = Inicial;
+            }
+        } else {
+            endLevelScreen = false;
+        }
+    } else if (endLevelMenuIndex == 1) {
+        resetPlayerPosition();
+        endLevelScreen = false; 
+    } else {
+        currentScreen = Inicial;
+        endLevelScreen = false;
+    }
+    endLevelMenuIndex = 0;
+    isVictory = false;
+}
+
+int isEndLevelScreenActive(void) {
+    return endLevelScreen ? 1 : 0;
+}
+
 void init() {
     glEnable(GL_DEPTH_TEST);
     glMatrixMode(GL_PROJECTION);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
     glLoadIdentity();
     gluPerspective(30.0, 1.33, 0.1, 200.0);
     glMatrixMode(GL_MODELVIEW);
     glutSetCursor(GLUT_CURSOR_INHERIT);
+    initCustomFont("GAMERIA.ttf", 128.0f); 
+    loadObjectFile("trophy.obj");
 
-    // Gera a textura agora que as funções sabem o escopo das variáveis
-    gerarTexturaSombra(); 
+    initSaveSystem();
+    const char* valStr = getConfigValue("p");
+    if (valStr) {
+        int loadedSkin = atoi(valStr);
+        if (loadedSkin >= 1 && loadedSkin <= 4) {
+            skinPlayer = loadedSkin;
+        }
+    }
+
+    gerarTexturaSombra();
 }
 
-// ============================================================================
-// --- 3. CONTROLES E ENTRADAS DE TECLADO ---
-// ============================================================================
+static void clearControlStates(void) {
+    for (int i = 0; i < 256; i++) {
+        keyStates[i] = false;
+        specialKeyStates[i] = false;
+    }
+    mouseSpecialDown = false;
+}
 
-void specialDown(int key, int x, int y) { if (key < 256) specialKeyStates[key] = true; }
-void specialUp(int key, int x, int y) { if (key < 256) specialKeyStates[key] = false; }
+void specialDown(int key, int x, int y) {
+    if (currentScreen == Level) {
+        if (endLevelScreen) {
+            if (key == GLUT_KEY_UP) {
+                endLevelMenuIndex = (endLevelMenuIndex + endLevelMenuCount - 1) % endLevelMenuCount;
+            } else if (key == GLUT_KEY_DOWN) {
+                endLevelMenuIndex = (endLevelMenuIndex + 1) % endLevelMenuCount;
+            }
+            glutPostRedisplay();
+            return;
+        }
+        if (key < 256 && isArrowControlAllowed()) {
+            if (key == GLUT_KEY_LEFT || key == GLUT_KEY_RIGHT || key == GLUT_KEY_UP) {
+                specialKeyStates[key] = true;
+            }
+        }
+        
+        return;
+        
+    }
+
+    if (key == GLUT_KEY_UP) {
+        menuNavigateUp();
+    } else if (key == GLUT_KEY_DOWN) {
+        menuNavigateDown();
+    } else if (key == GLUT_KEY_LEFT) {
+        menuChangeStateLeft();
+    } else if (key == GLUT_KEY_RIGHT) {
+        menuChangeStateRight();
+    }
+    glutPostRedisplay();
+}
+
+void specialUp(int key, int x, int y) {
+    if (currentScreen != Level) return;
+    if (key < 256 && isArrowControlAllowed()) {
+        specialKeyStates[key] = false;
+    }
+}
 
 void keyboardDown(unsigned char key, int x, int y) {
     if (key >= 'A' && key <= 'Z') key += 32;
     if (key == 'm') {
+        if (getSelectedControlMode() == CONTROL_MODE_MOUSE) {
+            return;
+        }
         mouseControlEnabled = !mouseControlEnabled;
         if (!mouseControlEnabled) {
             mouseSpecialDown = false;
@@ -218,21 +345,124 @@ void keyboardDown(unsigned char key, int x, int y) {
         return;
     }
 
-    if (key < 256) {
-        keyStates[key] = true;
-        if (key == ' ' || key == 'j') {
-            jumpBufferTimer = JUMP_BUFFER_MAX; 
+    if (currentScreen != Level) {
+        if (currentScreen == Inicial) {
+            if (key == 's') {
+                currentScreen = SelecaoLevel;
+                clearControlStates();
+                return;
+            }
+            if (key == 'c') {
+                currentScreen = Configuracoes;
+                clearControlStates();
+                return;
+            }
+            if (key == 'p') {
+                currentScreen = Level;
+                mouseControlEnabled = (getSelectedControlMode() == CONTROL_MODE_MOUSE);
+                mouseSpecialDown = false;
+                clearControlStates();
+                return;
+            }
+            if (key == '\r') {
+                menuSelectOption();
+                mouseControlEnabled = (getSelectedControlMode() == CONTROL_MODE_MOUSE);
+                mouseSpecialDown = false;
+                clearControlStates();
+                return;
+            }
+        } else if (currentScreen == Configuracoes) {
+            if (key == 'b') {
+                currentScreen = Inicial;
+                clearControlStates();
+                return;
+            }
+            if (key == '\r') {
+                menuSelectOption();
+                clearControlStates();
+                return;
+            }
+        } else if (currentScreen == SelecaoLevel) {
+            if (key == '\r') {
+                menuSelectOption();
+                mouseControlEnabled = (getSelectedControlMode() == CONTROL_MODE_MOUSE);
+                mouseSpecialDown = false;
+                clearControlStates();
+                return;
+            }
+            if (key == 'b') {
+                currentScreen = Inicial;
+                clearControlStates();
+                return;
+            }
         }
+        clearControlStates();
+        return;
+    }
+
+        if (key == '1') {
+            if (!isVictory) { 
+                endLevelScreen = !endLevelScreen;
+                if (endLevelScreen) {
+                    endLevelMenuIndex = 0;
+                }
+                glutPostRedisplay();
+            }
+            return;
+        }
+
+if (key == '\r') {
+    if (endLevelScreen) {
+        int escolha = endLevelMenuIndex;
+
+        endLevelScreen = false;
+        
+        if (isVictory && escolha == 0) {
+            isVictory = false;
+            
+            if (canAdvanceToNextLevel()) {
+                int proximoNivel = getSelectedLevel() + 1;
+                setSelectedLevel(proximoNivel);
+                setUnlockedLevel(proximoNivel);
+                resetPlayerPosition();
+            } else {
+                currentScreen = Inicial;
+            }
+        } else {
+            isVictory = false;
+            endLevelMenuIndex = escolha;
+            endLevelConfirmSelection();
+        }
+    } else {
+        endLevelScreen = true;
+        endLevelMenuIndex = 0;
+    }
+    
+    glutPostRedisplay();
+    return;
+}
+
+        ControlMode mode = getSelectedControlMode();
+    if (key < 256 && (key == ' ' || key == 'j')) {
+        keyStates[key] = true;
+        jumpBufferTimer = JUMP_BUFFER_MAX;
+    } else if (mode == CONTROL_MODE_WASD && key < 256) {
+        keyStates[key] = true;
     }
 }
 
 void keyboardUp(unsigned char key, int x, int y) {
+    if (currentScreen != Level) return;
     if (key >= 'A' && key <= 'Z') key += 32;
-    if (key < 256) keyStates[key] = false;
+    if (key < 256 && (key == ' ' || key == 'j')) {
+        keyStates[key] = false;
+    } else if (getSelectedControlMode() == CONTROL_MODE_WASD && key < 256) {
+        keyStates[key] = false;
+    }
 }
 
 void mouseMotion(int x, int y) {
-    if (!mouseControlEnabled) return;
+    if (!mouseControlEnabled || !isMouseControlAllowed()) return;
 
     int width = glutGet(GLUT_WINDOW_WIDTH);
     if (width <= 0) return;
@@ -244,9 +474,9 @@ void mouseMotion(int x, int y) {
 }
 
 void mouseClick(int button, int state, int x, int y) {
-    if (!mouseControlEnabled) return;
+    if (!mouseControlEnabled || !isMouseControlAllowed()) return;
 
-    if (button == GLUT_MIDDLE_BUTTON) {
+    if (button == GLUT_LEFT_BUTTON) {
         if (state == GLUT_DOWN) {
             mouseSpecialDown = true;
         } else if (state == GLUT_UP) {
@@ -255,14 +485,13 @@ void mouseClick(int button, int state, int x, int y) {
     }
 }
 
-//RENDERIZAÇÃO DA INTERFACE (HUD) E LOOP DE FÍSICA ---
-
 void drawHUD() {
+    glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT);
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
     
-    glOrtho(0, 800, 0, 600, -1, 1);
+    glOrtho(0, 800, 600, 0, -1, 1);
     
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
@@ -271,67 +500,149 @@ void drawHUD() {
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
 
-    float squareSize = 50.0f;
-    float padding = 10.0f;
-    float leftX = 20.0f;
-    float rightX = leftX + squareSize + padding;
-    float bottomY = 530.0f;
-    float topY = 580.0f;
+    char levelText[32];
+    sprintf(levelText, "Level  %d", getSelectedLevel());
+    
+    glColor3f(0.0f, 0.0f, 0.0f); 
+    drawHDTextScaled(19.0f, 25.0f, levelText, 0.22f);
 
-    glColor3f(0.3f, 0.0f, 0.0f);
+    int levelEnd = getLevelEnd();
+    if (levelEnd <= 0) levelEnd = 1;
+    float progress = (-cameraZ) / (float)levelEnd;
+    if (progress < 0.0f) progress = 0.0f;
+    if (progress > 1.0f) progress = 1.0f;
+
+    float barWidth = 220.0f;
+    float barHeight = 24.0f;
+    float margin = 20.0f;
+    float outerLeft = 800.0f - margin - barWidth;
+    float outerRight = 800.0f - margin;
+    float outerTop = margin;
+    float outerBottom = outerTop + barHeight;
+
+    glColor3f(0.0f, 0.0f, 0.0f);
     glBegin(GL_QUADS);
-        glVertex2f(leftX, bottomY);
-        glVertex2f(leftX + squareSize, bottomY);
-        glVertex2f(leftX + squareSize, topY);
-        glVertex2f(leftX, topY);
+        glVertex2f(outerLeft, outerTop);
+        glVertex2f(outerRight, outerTop);
+        glVertex2f(outerRight, outerBottom);
+        glVertex2f(outerLeft, outerBottom);
     glEnd();
 
-    float coverageWidth = squareSize * platformCoverage;
-    if (coverageWidth < 0.0f) coverageWidth = 0.0f;
-    if (coverageWidth > squareSize) coverageWidth = squareSize;
+    float innerPadding = 4.0f;
+    float innerLeft = outerLeft + innerPadding;
+    float innerRight = outerRight - innerPadding;
+    float innerTop = outerTop + innerPadding;
+    float innerBottom = outerBottom - innerPadding;
+    float fillWidth = (innerRight - innerLeft) * progress;
 
-    glColor3f(1.0f, 0.0f, 0.0f);
+    glColor3f(0.8f, 0.1f, 0.1f);
     glBegin(GL_QUADS);
-        glVertex2f(leftX, bottomY);
-        glVertex2f(leftX + coverageWidth, bottomY);
-        glVertex2f(leftX + coverageWidth, topY);
-        glVertex2f(leftX, topY);
-    glEnd();
-
-    glColor3f(0.15f, 0.0f, 0.0f);
-    glBegin(GL_QUADS);
-        glVertex2f(rightX, bottomY);
-        glVertex2f(rightX + squareSize, bottomY);
-        glVertex2f(rightX + squareSize, topY);
-        glVertex2f(rightX, topY);
-    glEnd();
-
-    float halfSize = (squareSize - 4.0f) * 0.5f;
-    float leftBar = halfSize * platformCoverageLeft;
-    float rightBar = halfSize * platformCoverageRight;
-    if (leftBar < 0.0f) leftBar = 0.0f;
-    if (leftBar > halfSize) leftBar = halfSize;
-    if (rightBar < 0.0f) rightBar = 0.0f;
-    if (rightBar > halfSize) rightBar = halfSize;
-
-    glColor3f(1.0f, 0.2f, 0.2f);
-    glBegin(GL_QUADS);
-        glVertex2f(rightX + 2.0f, bottomY + 2.0f);
-        glVertex2f(rightX + 2.0f + leftBar, bottomY + 2.0f);
-        glVertex2f(rightX + 2.0f + leftBar, topY - 2.0f);
-        glVertex2f(rightX + 2.0f, topY - 2.0f);
-    glEnd();
-
-    glColor3f(1.0f, 0.6f, 0.6f);
-    glBegin(GL_QUADS);
-        glVertex2f(rightX + 2.0f + halfSize, bottomY + 2.0f);
-        glVertex2f(rightX + 2.0f + halfSize + rightBar, bottomY + 2.0f);
-        glVertex2f(rightX + 2.0f + halfSize + rightBar, topY - 2.0f);
-        glVertex2f(rightX + 2.0f + halfSize, topY - 2.0f);
+        glVertex2f(innerLeft, innerTop);
+        glVertex2f(innerLeft + fillWidth, innerTop);
+        glVertex2f(innerLeft + fillWidth, innerBottom);
+        glVertex2f(innerLeft, innerBottom);
     glEnd();
 
     glEnable(GL_DEPTH_TEST);
     
+    if (endLevelScreen) {
+        int winW = glutGet(GLUT_WINDOW_WIDTH);
+        int winH = glutGet(GLUT_WINDOW_HEIGHT);
+        if (winW <= 0) winW = 800; 
+        if (winH <= 0) winH = 600;
+
+        float boxWidth = 500.0f;  
+        float boxHeight = 320.0f; 
+        
+        float boxX = (winW - boxWidth) * 0.5f;
+        float boxY = (winH - boxHeight) * 0.5f;
+        float optionSpacing = 36.0f;
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_TEXTURE_2D);
+
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0, winW, winH, 0, -1, 1); 
+        
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity(); 
+
+        glColor3f(0.0f, 0.0f, 0.0f);
+        glBegin(GL_QUADS);
+            glVertex2f(boxX, boxY);
+            glVertex2f(boxX + boxWidth, boxY);
+            glVertex2f(boxX + boxWidth, boxY + boxHeight);
+            glVertex2f(boxX, boxY + boxHeight);
+        glEnd();
+        
+        glColor3f(0.9f, 0.9f, 0.9f);
+        glLineWidth(3.0f);
+        glBegin(GL_LINE_LOOP);
+            glVertex2f(boxX, boxY);
+            glVertex2f(boxX + boxWidth, boxY);
+            glVertex2f(boxX + boxWidth, boxY + boxHeight);
+            glVertex2f(boxX, boxY + boxHeight);
+        glEnd();
+
+        const char* titleText = isVictory ? "Nivel Concluido" : "Pausa";
+        const char* optionText[3];
+        if (isVictory) {
+            optionText[0] = "Proximo Nivel";
+            optionText[1] = "Jogar Novamente";
+            optionText[2] = "Menu Inicial";
+        } else {
+            optionText[0] = "Continuar";
+            optionText[1] = "Reiniciar";
+            optionText[2] = "Menu Inicial";
+        }
+        
+        float titleScale = 0.28f;
+        float titleX = (winW - (getTextWidthPixels(titleText) * titleScale)) * 0.5f;
+        float titleY = boxY + 50.0f; 
+        
+        if (isVictory) glColor3f(0.2f, 0.9f, 0.2f);
+        else glColor3f(1.0f, 1.0f, 1.0f);
+        
+        drawHDTextScaled(titleX, titleY, titleText, titleScale);
+
+        float optionScale = 0.22f;
+        for (int i = 0; i < endLevelMenuCount; i++) {
+            float optionY = titleY + 55.0f + (i * optionSpacing);
+            
+            char optionLine[128];
+            if (i == endLevelMenuIndex) {
+                sprintf(optionLine, "x %s", optionText[i]);
+            } else {
+                sprintf(optionLine, "  %s", optionText[i]);
+            }
+            
+            float optionX = (winW - (getTextWidthPixels(optionLine) * optionScale)) * 0.5f;
+            glColor3f(1.0f, 1.0f, 1.0f);
+            drawHDTextScaled(optionX, optionY, optionLine, optionScale);
+        }
+
+        const char* footerText = "Pressione Enter para confirmar";
+        float footerScale = 0.18f;
+        float footerX = (winW - (getTextWidthPixels(footerText) * footerScale)) * 0.5f;
+        float footerY = boxY + boxHeight - 30.0f;
+        
+        drawHDTextScaled(footerX, footerY, footerText, footerScale);
+
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+        glPopMatrix();
+
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_LIGHTING);
+        glLineWidth(1.0f);
+        glPopAttrib();
+    }
+
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
@@ -339,21 +650,17 @@ void drawHUD() {
 }
 
 void timer(int v) {
-    // Movimentação Lateral e Frontal 
-    bool steerLeft = mouseControlEnabled && mouseXPercent < -0.10f;
-    bool steerRight = mouseControlEnabled && mouseXPercent > 0.10f;
+    bool steerLeft = isMouseControlAllowed() && mouseControlEnabled && mouseXPercent < -0.10f;
+    bool steerRight = isMouseControlAllowed() && mouseControlEnabled && mouseXPercent > 0.10f;
     bool mouseSteerActive = false;
 
     if (steerLeft || steerRight) {
         float absPercent = fabsf(mouseXPercent);
         if (absPercent > 0.70f) {
-            // velocidade máxima
             mouseSteerActive = true;
         } else if (absPercent > 0.40f) {
-            // 1/2: pressionado 1 frame, solto 1 frame
             mouseSteerActive = (mouseSteerFrame % 2) == 0;
         } else {
-            // entre 10% e 40% -> 1/3: pressionado 1 frame, solto 2 frames
             mouseSteerActive = (mouseSteerFrame % 3) == 0;
         }
         mouseSteerFrame++;
@@ -361,21 +668,56 @@ void timer(int v) {
         mouseSteerFrame = 0;
     }
 
-    bool leftInput = specialKeyStates[GLUT_KEY_LEFT] || keyStates['a'];
-    bool rightInput = specialKeyStates[GLUT_KEY_RIGHT] || keyStates['d'];
+    if (currentScreen != Level) {
+        clearControlStates();
+        glutPostRedisplay();
+        glutTimerFunc(16, timer, 0);
+        return;
+    }
 
-    if (mouseSteerActive && steerLeft) leftInput = true;
-    if (mouseSteerActive && steerRight) rightInput = true;
+    int levelEnd = getLevelEnd();
+    if (!isDead && !endLevelScreen && (-cameraZ) >= (float)levelEnd) {
+        endLevelScreen = true;
+        isVictory = true;
+        endLevelMenuIndex = 0;
+        speed = 0.0f;
+        lateralSpeed = 0.0f;
+    }
 
-    // Verifica se o personagem desapareceu da tela quando morto
+    if (endLevelScreen) {
+        glutPostRedisplay();
+        glutTimerFunc(16, timer, 0);
+        return;
+    }
+
+    bool leftInput = false;
+    bool rightInput = false;
+    bool forwardInput = false;
+    ControlMode mode = getSelectedControlMode();
+
+    if (mode == CONTROL_MODE_ARROW) {
+        leftInput = specialKeyStates[GLUT_KEY_LEFT];
+        rightInput = specialKeyStates[GLUT_KEY_RIGHT];
+        forwardInput = specialKeyStates[GLUT_KEY_UP];
+    } else if (mode == CONTROL_MODE_WASD) {
+        leftInput = keyStates['a'];
+        rightInput = keyStates['d'];
+        forwardInput = keyStates['w'];
+    } else if (mode == CONTROL_MODE_MOUSE) {
+        if (mouseSteerActive) {
+            if (steerLeft) leftInput = true;
+            if (steerRight) rightInput = true;
+        }
+        forwardInput = mouseSpecialDown;
+    }
+
     if (isDead && !deadControlLocked) {
         float playerYPos = cameraY - 1.0f + deathBallYOffset;
-        if (playerYPos < -0.8f) { // Personagem suficientemente abaixo
+        if (playerYPos < -0.8f) { 
             deadControlLocked = true;
         }
     }
 
-    // Bloqueia entrada ANTES de usar
     if (deadControlLocked) {
         leftInput = false;
         rightInput = false;
@@ -394,10 +736,7 @@ void timer(int v) {
     if (lateralSpeed < -maxLateralSpeed) lateralSpeed = -maxLateralSpeed;
 
     if (isDead) {
-        // A velocidade residual pode puxar o personagem um pouco para dentro do bloco,
-        // mas até o limiar de minPlatformCoverageToStand. Se ultrapassar, rejeita o movimento.
         updatePlatformCoverage();
-        float coverageAntes = platformCoverage;
         float cameraXAntes = cameraX;
         cameraX += lateralSpeed;
         updatePlatformCoverage();
@@ -412,27 +751,36 @@ void timer(int v) {
     }
 
     if (!isDead) {
-        if (specialKeyStates[GLUT_KEY_UP] || keyStates['w'] || (mouseControlEnabled && mouseSpecialDown)) {
+        if (forwardInput) {
             speed += accelVertical;
             if (speed > maxSpeed) speed = maxSpeed;
         } else {
             if (speed > minSpeed) speed -= dragVertical;
         }
     } else {
-        speed -= dragVertical * 1.5f;
-        if (speed < 0.0f) speed = 0.0f;
+        speed = pow(speed, 1.009f); 
+        if (speed < 0.005f) speed = 0.0f;
     }
 
     updatePlatformCoverage();
     bool temChaoEmbaixo = (platformCoverage > minPlatformCoverageToStand);
 
-    // Checagem de morte
+    if (isDead) {
+        float shadowZPos = cameraZ + 3.65f;
+        int colCentro = (int)floorf(cameraX / blockWidth);
+        int rowCentro = (int)floorf(-shadowZPos);
+        int rowFrente = rowCentro + 1;
+
+        if (colCentro >= 0 && colCentro < 5 && getMapValue(rowFrente, colCentro) == 1) {
+            speed = 0.0f;
+        }
+    }
+
     if (!isDead && !isJumping && !temChaoEmbaixo && cameraY <= groundY) {
         isDead = true;
         deathFallSpeed = 0.0f;
     }
 
-    // Inicialização do pulo
     if (!isDead && jumpBufferTimer > 0 && !isJumping && cameraY <= groundY && temChaoEmbaixo) {
         isJumping = true;
         canAscend = true;
@@ -446,6 +794,11 @@ void timer(int v) {
     if (isDead) {
         deathFallSpeed -= gravity;
         deathBallYOffset += deathFallSpeed;
+        deathTimer++;
+        if (deathTimer >= 62) {
+            resetPlayerPosition();
+            deathTimer = 0;
+        }
     } else if (isJumping) {
         jumpTimer++;
         bool jumpKeyPressed = (keyStates[' '] || keyStates['j']);
